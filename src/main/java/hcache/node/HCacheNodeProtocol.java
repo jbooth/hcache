@@ -8,9 +8,5 @@ public interface HCacheNodeProtocol extends VersionedProtocol {
 
   public static final long HCacheNodeProtocol = 1L;
   
-  public void localizeText(Path hadoopFile);
-  
-  public void localizeSequence(Path hadoopFile);
-  
-  public void cleanup(LongWritable minAge);
+  public void localize(Path hadoopFile);
 }

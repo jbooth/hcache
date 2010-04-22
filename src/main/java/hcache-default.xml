@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+
+<!-- Do not modify this file directly.  Instead, copy entries that you -->
+<!-- wish to modify from this file into hdfs-site.xml and change them -->
+<!-- there.  If hdfs-site.xml does not already exist, create it.      -->
+
+<configuration>
+
+<property>
+  <name>hcache.nodePort</name>
+  <value>55999</value>
+  <description>Node for the local hcache service</description>
+</property>
+
+<property>
+  <name>hcache.fileStoreRoot</name>
+  <value>/tmp/hcache</value>
+  <description>
+    Root of local file store
+  </description>
+</property>
+</configuration>
