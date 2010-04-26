@@ -1,0 +1,9 @@
+
+./build-dist.sh
+cd dist
+cp hcache-0.1.jar $HADOOP_HOME/lib/.
+cp start-hcache.sh $HADOOP_HOME/bin/.
+
+cd $HADOOP_HOME
+bin/start-hcache.sh
+

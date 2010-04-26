@@ -18,19 +18,23 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.io.LongWritable;
+import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.ipc.RPC.Server;
+import org.apache.hadoop.mapred.FileSplit;
+import org.apache.hadoop.mapred.JobConf;
+import org.apache.hadoop.mapred.KeyValueLineRecordReader;
+import org.apache.hadoop.mapred.RecordReader;
+import org.apache.hadoop.mapred.SequenceFileRecordReader;
 import org.apache.hadoop.net.NetUtils;
-import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
 
 /**
  * Simple IPC Server that coordinates downloads across processes to prevent
  * downloading the same file 100 times simultaneously.
  */
-public class HCacheNode implements HCacheNodeProtocol {
+public class HCacheNode extends Thread implements HCacheNodeProtocol {
   private final Server server;
   private InetSocketAddress serverAddress;
   private static final Log LOG = LogFactory.getLog(HCacheNode.class);
@@ -54,9 +58,15 @@ public class HCacheNode implements HCacheNodeProtocol {
     this.conf = conf;
   }
 
-  public void start() throws IOException {
+  @Override
+  public void run() {
     LOG.info("HCacheNode starting on " + serverAddress);
-    server.start();
+    try {
+      server.start();
+    } catch (IOException ioe) {
+      LOG.fatal(StringUtils.stringifyException(ioe));
+      return;
+    }
     try {
       server.join();
     } catch (InterruptedException ie) {
@@ -64,12 +74,9 @@ public class HCacheNode implements HCacheNodeProtocol {
     }
   }
 
-  public void stop() {
+  public void kill() {
+    LOG.info("Stopping");
     server.stop();
-  }
-
-  public void join() throws InterruptedException {
-    server.join();
   }
 
   public static void main(String[] args) {
@@ -84,8 +91,9 @@ public class HCacheNode implements HCacheNodeProtocol {
       server.start();
       server.join();
     } catch (Exception e) {
+      LOG.fatal(StringUtils.stringifyException(e));
       if (server != null)
-        server.stop();
+        server.kill();
       try {
         server.join();
       } catch (InterruptedException ie) {
@@ -102,8 +110,10 @@ public class HCacheNode implements HCacheNodeProtocol {
    * Only service method, blocks until file is localized.
    * Guarantees that block will only be localized once.
    */
-  public void localize(Path hadoopFile) {
+  public void localize(Text hadoopPath) {
+    Path hadoopFile = new Path(hadoopPath.toString());
     try {
+      LOG.info("Request to localize " + hadoopFile);
       Future<?> transfer = null;
       // critical section, fetch future representing either 
       // already existing transfer or new transfer
@@ -118,9 +128,12 @@ public class HCacheNode implements HCacheNodeProtocol {
       try {
         // wait till done, remove
         transfer.get();
+        LOG.info("Got file, returning..");
         synchronized(this) {
           filesUnderConstruction.remove(hadoopFile);
         }
+        LOG.info("Cleared final lock, returning for real");
+        
       } catch (ExecutionException e) {
         LOG.fatal(StringUtils.stringifyException(e));
       } catch (InterruptedException e) {
@@ -158,11 +171,12 @@ public class HCacheNode implements HCacheNodeProtocol {
       // double check we don't already have it
       if (store.checkFile(hadoopPath) != null) return null;
       File localTmp = store.createTmp();
+      LOG.info("Opening " + localTmp + " tmp file to create cdb");
       CdbWriter writer = new CdbWriter(localTmp, 1024 * 16);
-      KeyValueReader<Writable,Writable> reader = (KeyValueReader<Writable, Writable>) getReader(hadoopPath);
-      Writable k = ReflectionUtils.newInstance(reader.getKeyClass(), conf);
-      Writable v = ReflectionUtils.newInstance(reader.getValueClass(), conf);
-      while (reader.read(k, v)) {
+      RecordReader<Writable,Writable> reader = (RecordReader<Writable, Writable>) getRecordReader(hadoopPath);
+      Writable k = reader.createKey();
+      Writable v = reader.createValue();
+      while (reader.next(k, v)) {
         writer.add(k, v);
       }
       writer.close();
@@ -170,18 +184,19 @@ public class HCacheNode implements HCacheNodeProtocol {
       store.commitLocal(hadoopPath, localTmp);
       return "success";
     }
-    
+
     @SuppressWarnings("unchecked")
-    private KeyValueReader<? extends Writable, ? extends Writable> getReader(
+    private RecordReader<? extends Writable, ? extends Writable> getRecordReader(
         Path p) throws IOException {
       FSDataInputStream in = hadoop.open(p);
       byte[] header = new byte[3];
       in.readFully(header);
       in.close();
+      FileSplit split = new FileSplit(p, 0, hadoop.getLength(p), new JobConf(conf));
       if (header[0] == 'S' && header[1] == 'E' && header[2] == 'Q') {
-        return new SequenceReader(p, conf);
+        return new SequenceFileRecordReader(conf, split);
       } else {
-        return new TabReader(p, conf);
+        return new KeyValueLineRecordReader(conf, split);
       }
     }
   }
