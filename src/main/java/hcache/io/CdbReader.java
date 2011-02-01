@@ -39,104 +39,56 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.util.ArrayList;
 import java.util.Enumeration;
+import java.util.List;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSInputStream;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.util.ReflectionUtils;
 
 /**
  * Cdb implements a Java interface to D.&nbsp;J.&nbsp;Bernstein's CDB database.
- * 
- * @author Michael Alyn Miller <malyn@strangeGizmo.com>
- * @version 1.0.3
  */
-public class CdbReader<K extends Writable, V extends Writable> implements Closeable {
+public class CdbReader<K extends Writable, V extends Writable> implements
+    Closeable,KVReader<K,V> {
   private Configuration conf = new Configuration();
-  private Class<K> keyClass = null;
+  private final Class<K> keyClass;
+  private final Class<V> valueClass;
   /** The RandomAccessFile for the CDB file. */
-  private FSDataInputStream file_ = null;
+  private final FileChannel file_;
+  
   /**
    * The slot pointers, cached here for efficiency as we do not have mmap() to
    * do it for us. These entries are paired as (pos, len) tuples.
    */
-  private int[] slotTable_ = null;
+  private final long[] slotPos;
+  private final int[] slotLen;
 
-  /** The number of hash slots searched under this key. */
-  private int loop_ = 0;
-
-  /** The hash value for the current key. */
-  private int khash_ = 0;
-
-  /** The number of hash slots in the hash table for the current key. */
-  private int hslots_ = 0;
-
-  /** The position of the hash table for the current key */
-  private int hpos_ = 0;
-
-  /** The position of the current key in the slot. */
-  private int kpos_ = 0;
-
-  
-  /** Default buffersize 2048 */
-  public static <K extends Writable, V extends Writable> CdbReader<K, V> openLocal(
-      File localFile) throws IOException {
-    return openLocal(localFile, 2048);
-  }
-  
-  /**
-   * Opens the supplied filename on the local file system
-   * 
-   * @param filepath
-   * @param bufferSize
-   * @throws IOException
-   */
-  public static <K extends Writable, V extends Writable> CdbReader<K, V> openLocal(
-      File localFile, int bufferSize) throws IOException {
-    FileSystem localFS = FileSystem.getLocal(new Configuration()).getRaw();
-    Path p = new Path(localFile.getAbsolutePath());
-    return new CdbReader<K, V>(localFS.open(p, bufferSize), localFS
-        .getFileStatus(p).getLen() - 2048);
-  }
-
-  /** Opens filePath on FileSystem denoted by conf */
-  public CdbReader(Path filePath, int bufferSize, Configuration conf) throws IOException {
-    this(FileSystem.get(conf).open(filePath, bufferSize), FileSystem.get(conf)
-        .getFileStatus(filePath).getLen() - 2048);
-  }
-
-  
   /** Initializes from the given FSDataInputStream */
   @SuppressWarnings("unchecked")
-  CdbReader(FSDataInputStream file, long footerStart) throws IOException {
+  public CdbReader(File file, Class<K> keyClass, Class<V> valueClass) throws IOException {
+    this.keyClass = keyClass;
+    this.valueClass = valueClass;
+    long footerStart = file.length() - (12 * CdbWriter.SLOTSIZE);
     /* Open the CDB file. */
-    file_ = file;
+    file_ = (new RandomAccessFile(file, "r")).getChannel();
     /*
      * Read and parse the slot table. We do not throw an exception if this
      * fails; the file might empty, which is not an error.
      */
     /* Read the table. */
-    byte[] table = new byte[2048];
-    file_.seek(footerStart);
-    file_.readFully(table);
-
-    /* Create and parse the table. */
-    slotTable_ = new int[256 * 2];
-
-    int offset = 0;
-    for (int i = 0; i < 256; i++) {
-      int pos = table[offset++] & 0xff | ((table[offset++] & 0xff) << 8)
-          | ((table[offset++] & 0xff) << 16) | ((table[offset++] & 0xff) << 24);
-
-      int len = table[offset++] & 0xff | ((table[offset++] & 0xff) << 8)
-          | ((table[offset++] & 0xff) << 16) | ((table[offset++] & 0xff) << 24);
-
-      slotTable_[i << 1] = pos;
-      slotTable_[(i << 1) + 1] = len;
+    SeekableInputStream in = new SeekableInputStream(file_, footerStart,
+        ByteBuffer.allocate(4096));
+    slotPos = new long[CdbWriter.SLOTSIZE];
+    slotLen = new int[CdbWriter.SLOTSIZE];
+    for (int i = 0 ; i < CdbWriter.SLOTSIZE ; i++) {
+      slotPos[i] = in.readLong();
+      slotLen[i] = in.readInt();
     }
   }
 
@@ -147,308 +99,63 @@ public class CdbReader<K extends Writable, V extends Writable> implements Closea
     /* Close the CDB file. */
     file_.close();
   }
-//
-//  /**
-//   * Computes and returns the hash value for the given key.
-//   * 
-//   * @param key
-//   *          The key to compute the hash value for.
-//   * @return The hash value of <code>key</code>.
-//   */
-//  static final int hash(BinaryComparable bytes) {
-//    byte[] key = bytes.getBytes();
-//    int keyLength = bytes.getLength();
-//    /* Initialize the hash value. */
-//    long h = 5381;
-//
-//    /* Add each byte to the hash value. */
-//    for (int i = 0; i < keyLength; i++) {
-//      // h = ((h << 5) + h) ^ key[i];
-//      long l = h << 5;
-//      h += (l & 0x00000000ffffffffL);
-//      h = (h & 0x00000000ffffffffL);
-//
-//      int k = key[i];
-//      k = (k + 0x100) & 0xff;
-//
-//      h = h ^ k;
-//    }
-//
-//    /* Return the hash value. */
-//    return (int) (h & 0x00000000ffffffffL);
-//  }
-
+  
   /**
-   * Prepares the class to search
-   */
-  public void findstart() {
-    loop_ = 0;
-  }
-
-  /**
-   * Finds the first record stored under the given key. Allocates and returns
-   * byte[] representing value.
+   * Gets the values for the given key.
    * 
    * @param key
-   *          The key to search for.
-   * @return The record store under the given key, or <code>null</code> if no
-   *         record with that key could be found.
-   */
-  // public byte[] find(byte[] key) throws IOException {
-  // findstart();
-  // int vlen = seeknext(key, key.length);
-  // if (vlen == -1) return null;
-  // byte[] value = new byte[vlen];
-  // file_.readFully(value);
-  // return value;
-  // }
-  /**
-   * Finds the first record stored under the given key.
-   * 
-   * @param key
-   *          The key to search for.
-   * @param value
-   *          Writable to fill with the result
-   * @return The record store under the given key, or <code>null</code> if no
-   *         record with that key could be found.
-   */
-  @SuppressWarnings("unchecked")
-  public Writable find(K key, V value) throws IOException {
-    // have to init keyclass this dumb way because generics
-    // are not reified
-    if (keyClass == null) {
-      WritableBuffer<K> keyBuffer = new WritableBuffer<K>(8096);
-      keyBuffer.put(key);
-      keyClass = (Class<K>) keyBuffer.getCurrentValueClass();
-    }
-    findstart();
-    long vpos = seeknext(key);
-    if (vpos == -1)
-      return null;
-    value.readFields(file_);
-    return value;
-  }
-
-  /**
-   * Seeks to the beginning of the next record stored under the given key.
-   * 
-   * @param key
-   *          The key to search for.
-   * @param value
-   *          Writable to be filled with the value
+   *          The key to search for.\
    * @return length of value if found, -1 if not found
    */
-  public long seeknext(K key) throws IOException {
+  public V get(K key) throws IOException {
+    System.err.println("Searching " + key.toString());
     K tmpKey = ReflectionUtils.newInstance(keyClass, conf);
-    /* There are no keys if we could not read the slot table. */
-    if (slotTable_ == null) {
-      throw new IOException("Couldn't read slot table");
-    }
+    int hash = CdbWriter.hash(key); 
 
-    /* Locate the hash entry if we have not yet done so. */
-    if (loop_ == 0) {
-      /* Get the hash value for the key. */
-      //int u = hash(keyBytes, keyLength);
-      int u = key.hashCode();
-      /* Unpack the information for this record. */
-      int slot = u & 255;
-      hslots_ = slotTable_[(slot << 1) + 1];
-      if (hslots_ == 0) {
-        return -1;
+    /* Locate the hash slot we're in */
+    int slot = hash & CdbWriter.SLOTSIZE;
+    int hlen = slotLen[slot];
+    long hpos = slotPos[slot];
+    // if no entries for this slot, just bail
+    if (hlen == 0) return null;
+
+    /* Now seek to slot containing this key */
+    SeekableInputStream in = new SeekableInputStream(file_, hpos, ByteBuffer.allocate(4096));
+    // find offset in hash by magic from CdbWriter
+    int offset = (hash >>> 8) % hlen;
+    // seek to approximate offset
+    in.seek(hpos + (offset*12));
+    
+    for (int i = 0 ; i < hlen ; i++) {
+      if (in.getPos() == (hpos + (hlen*12))) {
+        // we missed and need to wrap around to beginning of hash
+        in.seek(hpos);
       }
-      hpos_ = slotTable_[slot << 1];
-
-      /* Store the hash value. */
-      khash_ = u;
-
-      /* Locate the slot containing this key. */
-      u >>>= 8;
-      u %= hslots_;
-      u <<= 3;
-      kpos_ = hpos_ + u;
-    }
-
-    /* Search all of the hash slots for this key. */
-
-    try {
-      while (loop_ < hslots_) {
-        /* Read the entry for this key from the hash slot. */
-        file_.seek(kpos_);
-
-        int h = file_.readUnsignedByte() | (file_.readUnsignedByte() << 8)
-            | (file_.readUnsignedByte() << 16)
-            | (file_.readUnsignedByte() << 24);
-
-        int pos = file_.readUnsignedByte() | (file_.readUnsignedByte() << 8)
-            | (file_.readUnsignedByte() << 16)
-            | (file_.readUnsignedByte() << 24);
-        if (pos == 0) {
-          // key not found
-          return -1;
+      int h = in.readInt();
+      long kpos = in.readLong();
+      // if this is our match
+      if (h == hash) {
+        long prevPos = in.getPos();
+        // check for key
+        in.seek(kpos);
+        tmpKey.readFields(in);
+        if(tmpKey.equals(key)) {
+          // found our match!
+          V ret;
+          try {
+            ret = valueClass.newInstance();
+          } catch (Exception e) {
+            throw new RuntimeException(e);
+          }
+          ret.readFields(in);
+          return ret;
+        } else {
+          // key wasn't equal, continue reading hash section from previous position
+          in.seek(prevPos);
         }
-
-        /*
-         * Advance the loop count and key position. Wrap the key position around
-         * to the beginning of the hash slot if we are at the end of the table.
-         */
-        loop_ += 1;
-
-        kpos_ += 8;
-        if (kpos_ == (hpos_ + (hslots_ << 3)))
-          kpos_ = hpos_;
-
-        /* Ignore this entry if the hash values do not match. */
-        if (h != khash_)
-          continue;
-
-        /*
-         * Get the length of the key and data in this hash slot entry.
-         */
-        file_.seek(pos);
-
-        /*
-         * Read the key stored in this entry and compare it to the key we were
-         * given.
-         */
-        tmpKey.readFields(file_);
-        boolean match = (key.equals(tmpKey));
-
-        /* No match; check the next slot. */
-        if (!match)
-          continue;
-
-        /* The keys match, return value length */
-        return file_.getPos();
-
-        // byte[] d = new byte[dlen];
-        // file_.readFully(d);
-        // return d;
       }
-    } catch (IOException ignored) {
-      return -1;
     }
-
     /* No more data values for this key. */
-    return -1;
-  }
-
-  /**
-   * Returns an Enumeration containing a CdbElement for each entry in the
-   * constant database.
-   * 
-   * @param filepath
-   *          The CDB file to read.
-   * @return An Enumeration containing a CdbElement for each entry in the
-   *         constant database.
-   * @exception java.io.IOException
-   *              if an error occurs reading the constant database.
-   */
-  public static Enumeration elements(final String filepath) throws IOException {
-    /* Open the data file. */
-    final InputStream in = new BufferedInputStream(
-        new FileInputStream(filepath));
-
-    /* Read the end-of-data value. */
-    final int eod = (in.read() & 0xff) | ((in.read() & 0xff) << 8)
-        | ((in.read() & 0xff) << 16) | ((in.read() & 0xff) << 24);
-
-    /* Skip the rest of the hashtable. */
-    in.skip(2048 - 4);
-
-    /* Return the Enumeration. */
-    return new Enumeration() {
-      /* Current data pointer. */
-      int pos = 2048;
-
-      /* Finalizer. */
-      protected void finalize() {
-        try {
-          in.close();
-        } catch (Exception ignored) {
-        }
-      }
-
-      /*
-       * Returns <code>true</code> if there are more elements in the constant
-       * database (pos < eod); <code>false</code> otherwise.
-       */
-      public boolean hasMoreElements() {
-        return pos < eod;
-      }
-
-      /* Returns the next data element in the CDB file. */
-      public synchronized Object nextElement() {
-        try {
-          /* Read the key and value lengths. */
-          int klen = readLeInt();
-          pos += 4;
-          int dlen = readLeInt();
-          pos += 4;
-
-          /* Read the key. */
-          byte[] key = new byte[klen];
-          for (int off = 0; off < klen; /* below */) {
-            int count = in.read(key, off, klen - off);
-            if (count == -1)
-              throw new IllegalArgumentException("invalid cdb format");
-            off += count;
-          }
-          pos += klen;
-
-          /* Read the data. */
-          byte[] data = new byte[dlen];
-          for (int off = 0; off < dlen; /* below */) {
-            int count = in.read(data, off, dlen - off);
-            if (count == -1)
-              throw new IllegalArgumentException("invalid cdb format");
-            off += count;
-          }
-          pos += dlen;
-
-          /* Return a CdbElement with the key and data. */
-          return new CdbElement(key, data);
-        } catch (IOException ioException) {
-          throw new IllegalArgumentException("invalid cdb format");
-        }
-      }
-
-      /* Reads a little-endian integer from <code>in</code>. */
-      private int readLeInt() throws IOException {
-        return (in.read() & 0xff) | ((in.read() & 0xff) << 8)
-            | ((in.read() & 0xff) << 16) | ((in.read() & 0xff) << 24);
-      }
-    };
-  }
-
-  private static class LocalFSInput extends FSInputStream {
-    private final FileInputStream in;
-
-    public LocalFSInput(String filepath) throws IOException {
-      in = new FileInputStream(filepath);
-    }
-
-    public int read() throws IOException {
-      return in.read();
-    }
-
-    public int read(byte[] b, int off, int len) throws IOException {
-      return in.read(b, off, len);
-    }
-
-    public void close() throws IOException {
-      in.close();
-    }
-
-    public void seek(long pos) throws IOException {
-      in.getChannel().position(pos);
-    }
-
-    public long getPos() throws IOException {
-      return in.getChannel().position();
-    }
-
-    public boolean seekToNewSource(long targetPos) throws IOException {
-      return false;
-    }
+    return null;
   }
 }

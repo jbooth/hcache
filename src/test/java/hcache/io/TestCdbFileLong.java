@@ -2,7 +2,10 @@ package hcache.io;
 
 import static org.junit.Assert.assertEquals;
 
+import java.io.BufferedOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
 
 import org.apache.hadoop.io.LongWritable;
 import org.junit.Test;
@@ -16,19 +19,20 @@ public class TestCdbFileLong {
     LongWritable key = new LongWritable();
     LongWritable value = new LongWritable();
     File file = new File("/tmp/cdb.test");
-    CdbWriter writer = new CdbWriter(file, 8096);
-    for (long j = 1 ; j < 100001 ; j++) {
+    OutputStream out = new BufferedOutputStream(new FileOutputStream("/tmp/cdb.test"));
+    CdbWriter<LongWritable,LongWritable> writer = new CdbWriter<LongWritable,LongWritable>(out, LongWritable.class,LongWritable.class);
+    for (long j = 1 ; j < 20 ; j++) {
       key.set(j);
       value.set(j * 1000);
       System.out.println("Adding " + key + " : " + value);
-      writer.add(key, value);
+      writer.write(key, value);
     }
     writer.close();
-    CdbReader<LongWritable,LongWritable> reader = CdbReader.openLocal(file, 2048);
+    CdbReader<LongWritable,LongWritable> reader = new CdbReader<LongWritable,LongWritable>(file, LongWritable.class, LongWritable.class);
     long start = System.nanoTime();
     for (long j = 1 ; j < 100001 ; j++) {
       key.set(j);
-      reader.find(key, value);
+      value = reader.get(key);
       assertEquals("Got wrong value for key " + key + ", got val : " + value.get(), new Long(j*1000), new Long(value.get()));
     }
     long elapsed = System.nanoTime() - start;

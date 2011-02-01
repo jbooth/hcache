@@ -1,264 +1,181 @@
-/*
- * Copyright (c) 2000-2001, Michael Alyn Miller <malyn@strangeGizmo.com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice unmodified, this list of conditions, and the following
- *    disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of Michael Alyn Miller nor the names of the
- *    contributors to this software may be used to endorse or promote
- *    products derived from this software without specific prior written
- *    permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- */
-
 package hcache.io;
 
-/* Java imports. */
-import java.io.BufferedOutputStream;
-import java.io.DataOutputStream;
-import java.io.File;
-import java.io.FileOutputStream;
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.OutputStream;
-import java.util.Enumeration;
-import java.util.Vector;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.Writable;
 
-/**
- * Modified version of CDB format, omitting lengths for tighter
- * record packing and moving header section from the first 2k 
- * to the last 2k.
- *
- * Original author Michael Alyn Miller <malyn@strangeGizmo.com>
- */
-public final class CdbWriter<K extends Writable,V extends Writable> {
-	/** The RandomAccessFile for the CDB file. */
-	private FSDataOutputStream file_ = null;
+public class CdbWriter<K extends Writable, V extends Writable> implements
+    Closeable {
+  // number of slots in the slot table
+  // should take the form of 2^x-1, so we can use & for quick modulo
+  public static final int SLOTSIZE = 4095;
 
-	/** The list of hash pointers in the file, in their order in the
-	 * constant database. */
-	private Vector hashPointers_ = null;
+  private final Class<K> keyClass;
+  private final Class<V> valueClass;
+  private final FSDataOutputStream out;
 
-	/** The number of entries in each hash table. */
-	private int[] tableCount_ = null;
+  /**
+   * The list of hash pointers in the file, in their order in the constant
+   * database.
+   */
+  private final List<CdbHashPointer> hashPointers;
 
-	/** The first entry in each table. */
-	private int[] tableStart_ = null;
+  /** The number of entries in each hash table. */
+  private final int[] tableCount;
 
-	/** The position of the current key in the constant database. */
-	private int pos_ = 0;
+  public CdbWriter(OutputStream out, Class<K> keyClass, Class<V> valueClass)
+      throws IOException {
+    this(new FSDataOutputStream(out, null), keyClass, valueClass);
+  }
 
-	/** Writes a local Cdb file */
-	public CdbWriter(File file, int bufferSize) throws IOException {
-    this(
-        new BufferedOutputStream(new FileOutputStream(file), bufferSize));
-	}
-
-	/**
-	 * Opens a CDB file on the FileSystem denoted by conf
-	 * 
-	 * @param filepath The path to the constant database to create.
-	 * @exception java.io.IOException If an error occurs creating the
-	 *  constant database file.
-	 */
-	public CdbWriter(Path filepath, Configuration conf) throws IOException {
-		this(FileSystem.get(conf).create(filepath));
-	}
-	
-	public CdbWriter(OutputStream out) throws IOException {
-    /* Open the temporary CDB file. */
-	  this.file_ = new FSDataOutputStream(out);
-    /* Initialize the class. */
-    hashPointers_ = new Vector();
-    tableCount_ = new int[256];
-    tableStart_ = new int[256];
-
+  public CdbWriter(FSDataOutputStream out, Class<K> keyClass,
+      Class<V> valueClass) throws IOException {
+    this.out = out;
+    this.tableCount = new int[SLOTSIZE];
+    this.keyClass = keyClass;
+    this.valueClass = valueClass;
+    this.hashPointers = new ArrayList<CdbHashPointer>();
     /* Clear the table counts. */
     for (int i = 0; i < 256; i++)
-      tableCount_[i] = 0;
+      tableCount[i] = 0;
     /* Records can't be at position zero, so write one filler byte */
-    out.write((byte)-1);
-    posplus(1);
-	}
+    out.write((byte) -1);
+  }
 
-	/**
-	 * Adds a key to the constant database.
-	 *
-	 * @param key The key to add to the database.
-	 * @param data The data associated with this key.
-	 * @exception java.io.IOException If an error occurs adding the key
-	 *  to the database.
-	 */
-	// TODO remove lengths from format
-	public void add(K key, V data) throws IOException {
-	  
-	  int recordPos = (int)file_.getPos();
-	  /* Write out the key and data . */
-		key.write(file_);
-		data.write(file_);
-		int recordLen = ((int)file_.getPos() - recordPos);
-		
-		/* Add the hash pointer to our list. */
-		int hash = key.hashCode();
-		hashPointers_.addElement(new CdbHashPointer(hash, pos_));
-		/* Add this item to the count. */
-		tableCount_[hash & 0xff]++;
-		
-		/* Update the file position pointer. */
-		posplus(recordLen);
-	}
+  public void write(K key, V value) throws IOException {
+    long recordPos = out.getPos();
+    /* Write out the key and data . */
+    key.write(out);
+    value.write(out);
+    int recordLen = (int) (out.getPos() - recordPos);
 
-	/**
-	 * Finalizes the constant database.
-	 *
-	 * @exception java.io.IOException If an error occurs closing out the
-	 *  database.
-	 */
-	public void close() throws IOException {
-		/* Find the start of each hash table. */
-		int curEntry = 0;
-		for (int i = 0; i < 256; i++) {
-			curEntry += tableCount_[i];
-			tableStart_[i] = curEntry;
-		}
+    /* Add the hash pointer to our list. */
+    int hash = hash(key);
+    hashPointers.add(new CdbHashPointer(hash, recordPos));
+    System.err.println("Wrote " + key + ", pos : " + recordPos);
+    /* Add this item to the count. */
+    tableCount[hash & (SLOTSIZE - 1)]++;
+  }
 
-		/* Create a new hash pointer list in order by hash table. */
-		CdbHashPointer[] slotPointers
-			= new CdbHashPointer[hashPointers_.size()];
-		for (Enumeration e = hashPointers_.elements(); e.hasMoreElements(); ) {
-			CdbHashPointer hp = (CdbHashPointer)e.nextElement();
-			slotPointers[--tableStart_[hp.hash & 0xff]] = hp;
-		}
+  public void close() throws IOException {
+    // write slot sections, then slot index
+    /* Find the start of each hash table. */
+    int curEntry = 0;
 
-		/* Write out each of the hash tables, building the slot table in
-		 * the process. */
-		byte[] slotTable = new byte[2048];
-		for (int i = 0; i < 256; i++) {
-			/* Get the length of the hashtable. */
-			int len = tableCount_[i] * 2;
+    // sort hash entries so they'll be adjacent to equal hashes
+    Collections.sort(hashPointers);
+    // store the index for the start of each slotsize in the list
+    int[] tableStart = new int[SLOTSIZE];
+    CdbHashPointer last = null;
+    for (int i = 0 ; i < hashPointers.size() ; i++) {
+      CdbHashPointer hp = hashPointers.get(i);
+      if (last == null || hp.hash != last.hash) {
+        tableStart[hp.hash & SLOTSIZE] = i;
+      }
+      last = hp;
+    }
+    // now write the hash entries, build slot table as we go
+    long[] slotPos = new long[SLOTSIZE];
+    int[] slotLen = new int[SLOTSIZE];
+    
+    
+    for (int i = 0; i < SLOTSIZE; i++) {
+      int len = tableCount[i];
+      // length 0 means we're a nonentity
+      if (len == 0) {
+        slotPos[i] = 0;
+        slotLen[i] = 0;
+        continue;
+      }
+      // record that we have a slot here
+      slotPos[i] = out.getPos();
+      slotLen[i] = len;
+      
+      /* Build the hash table for this slot. */
+      int start = tableStart[i];
+      CdbHashPointer[] hashTable = new CdbHashPointer[len];
+      for (int u = 0; u < len; u++) {
+        /* Get the hash pointer. */
+        CdbHashPointer hp = hashPointers.get(u + start);
 
-			/* Store the position of this table in the slot table. */
-			slotTable[(i * 8) + 0] = (byte)(pos_ & 0xff);
-			slotTable[(i * 8) + 1] = (byte)((pos_ >>>  8) & 0xff);
-			slotTable[(i * 8) + 2] = (byte)((pos_ >>> 16) & 0xff);
-			slotTable[(i * 8) + 3] = (byte)((pos_ >>> 24) & 0xff);
-			slotTable[(i * 8) + 4 + 0] = (byte)(len & 0xff);
-			slotTable[(i * 8) + 4 + 1] = (byte)((len >>>  8) & 0xff);
-			slotTable[(i * 8) + 4 + 2] = (byte)((len >>> 16) & 0xff);
-			slotTable[(i * 8) + 4 + 3] = (byte)((len >>> 24) & 0xff);
+        /* Locate a free space in the hash table. */
+        int where = (hp.hash >>> 8) % len;
+        while (hashTable[where] != null)
+          if (++where == len)
+            where = 0;
+        System.err.println("Storing " + hp + " at " + where);
+        /* Store the hash pointer. */
+        hashTable[where] = hp;
+      }
+      
+      
+      
+      /* Write out the hash table. */
+      for (int u = 0; u < len; u++) {
+        CdbHashPointer hp = hashTable[u];
+        if (hp != null) {
+          System.err.println(hashTable[u] + " at " + out.getPos());
+          out.writeInt(hashTable[u].hash);
+          out.writeLong(hashTable[u].pos);
+        } else {
+          out.writeInt(0);
+          out.writeLong(0);
+        }
+      }
+    }
+    /* Append the slot table as the last few kb of file. */
+    for (int i = 0; i < SLOTSIZE; i++) {
+      out.writeLong(slotPos[i]);
+      out.writeInt(slotLen[i]);
+    }
 
-			/* Build the hash table. */
-			int curSlotPointer = tableStart_[i];
-			CdbHashPointer hashTable[] = new CdbHashPointer[len];
-			for (int u = 0; u < tableCount_[i]; u++) {
-				/* Get the hash pointer. */
-				CdbHashPointer hp = slotPointers[curSlotPointer++];
+    /* Close the file. */
+    out.close();
+  }
 
-				/* Locate a free space in the hash table. */
-				int where = (hp.hash >>> 8) % len;
-				while (hashTable[where] != null)
-					if (++where == len)
-						where = 0;
+  // same as HashPartitioner
+  static int hash(Writable h) {
+    return h.hashCode() & Integer.MAX_VALUE;
+  }
 
-				/* Store the hash pointer. */
-				hashTable[where] = hp;
-			}
+  static class CdbHashPointer implements Comparable<CdbHashPointer> {
+    /** The hash value of this entry. */
+    final int hash;
 
-			/* Write out the hash table. */
-			for (int u = 0; u < len; u++ ) {
-				CdbHashPointer hp = hashTable[u];
-				if (hp != null) {
-					writeLeInt(hashTable[u].hash);
-					writeLeInt(hashTable[u].pos);
-				} else {
-					writeLeInt(0);
-					writeLeInt(0);
-				}
-				posplus(8);
-			}
-		}
+    /** The position in the constant database of this entry. */
+    final long pos;
 
-		/* Append the slot table as the last 2kb of file. */
-		file_.write(slotTable);
+    // natural sort order by hash
+    public int compareTo(CdbHashPointer o) {
+      int thisVal = this.hash;
+      int anotherVal = o.hash;
+      return (thisVal<anotherVal ? -1 : (thisVal==anotherVal ? 0 : 1));
+    };
 
-		/* Close the file. */
-		file_.close();
-	}
+    /**
+     * Creates a new CdbHashPointer and initializes it with the given hash value
+     * and position.
+     * 
+     * @param hash
+     *          The hash value for this hash pointer.
+     * @param pos
+     *          The position of this entry in the constant database.
+     */
+    CdbHashPointer(int hash, long pos) {
+      this.hash = hash;
+      this.pos = pos;
+    }
 
+    @Override
+    public String toString() {
+      return "CdbHashPointer [hash=" + hash + ", pos=" + pos + "]";
+    }
 
-	/**
-	 * Writes an integer in little-endian format to the constant
-	 * database at the current file offset.
-	 *
-	 * @param v The integer to write to the file.
-	 */
-	private void writeLeInt(int v) throws IOException {
-		file_.writeByte((byte)(v & 0xff));
-		file_.writeByte((byte)((v >>>  8) & 0xff));
-		file_.writeByte((byte)((v >>> 16) & 0xff));
-		file_.writeByte((byte)((v >>> 24) & 0xff));
-	}
-
-	/**
-	 * Advances the file pointer by <code>count</code> bytes, throwing
-	 * an exception if doing so would cause the file to grow beyond
-	 * 4 GB.
-	 *
-	 * @param count The count of bytes to increase the file pointer by.
-	 * @exception java.io.IOException If increasing the file pointer by
-	 *  <code>count</code> bytes would cause the file to grow beyond
-	 *  4 GB.
-	 */
-	private void posplus(int count) throws IOException {
-		int newpos = pos_ + count;
-		if (newpos < count)
-			throw new IOException("CDB file is too big to add " + count + " more bytes. Current pos: " + pos_);
-		pos_ = newpos;
-	}
-}
-
-
-class CdbHashPointer {
-	/** The hash value of this entry. */
-	final int hash;
-
-	/** The position in the constant database of this entry. */
-	final int pos;
-
-
-	/**
-	 * Creates a new CdbHashPointer and initializes it with the given
-	 * hash value and position.
-	 *
-	 * @param hash The hash value for this hash pointer.
-	 * @param pos The position of this entry in the constant database.
-	 */
-	CdbHashPointer(int hash, int pos) {
-		this.hash = hash;
-		this.pos = pos;
-	}
+  }
 }
