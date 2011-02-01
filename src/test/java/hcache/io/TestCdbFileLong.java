@@ -33,6 +33,7 @@ public class TestCdbFileLong {
     for (long j = 1 ; j < 100001 ; j++) {
       key.set(j);
       value = reader.get(key);
+      System.err.println(key + " : " + value);
       assertEquals("Got wrong value for key " + key + ", got val : " + value.get(), new Long(j*1000), new Long(value.get()));
     }
     long elapsed = System.nanoTime() - start;

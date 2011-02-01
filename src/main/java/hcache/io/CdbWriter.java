@@ -53,14 +53,12 @@ public class CdbWriter<K extends Writable, V extends Writable> implements
     /* Write out the key and data . */
     key.write(out);
     value.write(out);
-    int recordLen = (int) (out.getPos() - recordPos);
-
     /* Add the hash pointer to our list. */
     int hash = hash(key);
+    /* Add this item to the count. */
     hashPointers.add(new CdbHashPointer(hash, recordPos));
     System.err.println("Wrote " + key + ", pos : " + recordPos);
-    /* Add this item to the count. */
-    tableCount[hash & (SLOTSIZE - 1)]++;
+    tableCount[hash & SLOTSIZE]++;
   }
 
   public void close() throws IOException {
@@ -153,10 +151,10 @@ public class CdbWriter<K extends Writable, V extends Writable> implements
     /** The position in the constant database of this entry. */
     final long pos;
 
-    // natural sort order by hash
+    // natural sort order by bucket
     public int compareTo(CdbHashPointer o) {
-      int thisVal = this.hash;
-      int anotherVal = o.hash;
+      int thisVal = this.hash & SLOTSIZE;
+      int anotherVal = o.hash & SLOTSIZE;
       return (thisVal<anotherVal ? -1 : (thisVal==anotherVal ? 0 : 1));
     };
 
