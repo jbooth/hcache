@@ -116,8 +116,14 @@ public class CdbReader<K extends Writable, V extends Writable> implements
     int slot = hash & CdbWriter.SLOTSIZE;
     int hlen = slotLen[slot];
     long hpos = slotPos[slot];
+    System.err.println("hash " + hash);
+    System.err.println("Slot " + slot);
+    System.err.println("hlen " + hlen);
+    System.err.println("hpos " + hpos);
     // if no entries for this slot, just bail
-    if (hlen == 0) return null;
+    if (hlen == 0) {
+      return null;
+    }
 
     /* Now seek to slot containing this key */
     SeekableInputStream in = new SeekableInputStream(file_, hpos, ByteBuffer.allocate(4096));
@@ -125,11 +131,12 @@ public class CdbReader<K extends Writable, V extends Writable> implements
     int offset = (hash >>> 8) % hlen;
     // seek to approximate offset
     in.seek(hpos + (offset*12));
-    
+    System.err.println("Seeking " + (hpos + (offset*12)));
     for (int i = 0 ; i < hlen ; i++) {
       if (in.getPos() == (hpos + (hlen*12))) {
         // we missed and need to wrap around to beginning of hash
         in.seek(hpos);
+        System.err.println("Seeking wraparound " + hpos);
       }
       int h = in.readInt();
       long kpos = in.readLong();
@@ -138,6 +145,7 @@ public class CdbReader<K extends Writable, V extends Writable> implements
         long prevPos = in.getPos();
         // check for key
         in.seek(kpos);
+        System.err.println("Seeking for key " + kpos);
         tmpKey.readFields(in);
         if(tmpKey.equals(key)) {
           // found our match!

@@ -96,7 +96,9 @@ public class CdbWriter<K extends Writable, V extends Writable> implements
       // record that we have a slot here
       slotPos[i] = out.getPos();
       slotLen[i] = len;
-      
+
+      System.err.println("slot pos " + i + " : " + slotPos[i]);
+      System.err.println("slot len " + i + " : " + slotLen[i]);
       /* Build the hash table for this slot. */
       int start = tableStart[i];
       CdbHashPointer[] hashTable = new CdbHashPointer[len];
