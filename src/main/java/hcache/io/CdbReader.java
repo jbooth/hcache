@@ -61,6 +61,7 @@ public class CdbReader<K extends Writable, V extends Writable> implements
   private final Class<V> valueClass;
   /** The RandomAccessFile for the CDB file. */
   private final FileChannel file_;
+  private final SeekableInputStream in;
   
   /**
    * The slot pointers, cached here for efficiency as we do not have mmap() to
@@ -69,21 +70,28 @@ public class CdbReader<K extends Writable, V extends Writable> implements
   private final long[] slotPos;
   private final int[] slotLen;
 
+  public CdbReader(File file, Class<K> keyClass, Class<V> valueClass) throws IOException {
+    this(file,4096,keyClass,valueClass);
+  }
+  public CdbReader(File file, int bufferSize, Class<K> keyClass, Class<V> valueClass) throws IOException {
+    this(new RandomAccessFile(file,"r").getChannel(), bufferSize, keyClass, valueClass);
+  }
+  
   /** Initializes from the given FSDataInputStream */
   @SuppressWarnings("unchecked")
-  public CdbReader(File file, Class<K> keyClass, Class<V> valueClass) throws IOException {
+  public CdbReader(FileChannel file, int bufferSize, Class<K> keyClass, Class<V> valueClass) throws IOException {
     this.keyClass = keyClass;
     this.valueClass = valueClass;
-    long footerStart = file.length() - (12 * CdbWriter.SLOTSIZE);
+    long footerStart = file.size() - (12 * CdbWriter.SLOTSIZE);
     /* Open the CDB file. */
-    file_ = (new RandomAccessFile(file, "r")).getChannel();
+    file_ = file;
     /*
      * Read and parse the slot table. We do not throw an exception if this
      * fails; the file might empty, which is not an error.
      */
     /* Read the table. */
-    SeekableInputStream in = new SeekableInputStream(file_, footerStart,
-        ByteBuffer.allocate(4096));
+    in = new SeekableInputStream(file_, footerStart,
+        ByteBuffer.allocate(bufferSize));
     slotPos = new long[CdbWriter.SLOTSIZE];
     slotLen = new int[CdbWriter.SLOTSIZE];
     for (int i = 0 ; i < CdbWriter.SLOTSIZE ; i++) {
@@ -108,35 +116,29 @@ public class CdbReader<K extends Writable, V extends Writable> implements
    * @return length of value if found, -1 if not found
    */
   public V get(K key) throws IOException {
-    System.err.println("Searching " + key.toString());
     K tmpKey = ReflectionUtils.newInstance(keyClass, conf);
     int hash = CdbWriter.hash(key); 
 
     /* Locate the hash slot we're in */
-    int slot = hash & CdbWriter.SLOTSIZE;
+    int slot = hash & CdbWriter.MAGIC;
     int hlen = slotLen[slot];
     long hpos = slotPos[slot];
-    System.err.println("hash " + hash);
-    System.err.println("Slot " + slot);
-    System.err.println("hlen " + hlen);
-    System.err.println("hpos " + hpos);
     // if no entries for this slot, just bail
     if (hlen == 0) {
       return null;
     }
 
     /* Now seek to slot containing this key */
-    SeekableInputStream in = new SeekableInputStream(file_, hpos, ByteBuffer.allocate(4096));
+    in.seek(hpos);
     // find offset in hash by magic from CdbWriter
     int offset = (hash >>> 8) % hlen;
     // seek to approximate offset
     in.seek(hpos + (offset*12));
-    System.err.println("Seeking " + (hpos + (offset*12)));
+    
     for (int i = 0 ; i < hlen ; i++) {
       if (in.getPos() == (hpos + (hlen*12))) {
         // we missed and need to wrap around to beginning of hash
         in.seek(hpos);
-        System.err.println("Seeking wraparound " + hpos);
       }
       int h = in.readInt();
       long kpos = in.readLong();
@@ -145,7 +147,6 @@ public class CdbReader<K extends Writable, V extends Writable> implements
         long prevPos = in.getPos();
         // check for key
         in.seek(kpos);
-        System.err.println("Seeking for key " + kpos);
         tmpKey.readFields(in);
         if(tmpKey.equals(key)) {
           // found our match!

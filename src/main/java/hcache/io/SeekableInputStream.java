@@ -66,13 +66,14 @@ public class SeekableInputStream extends DataInputStream implements DataInput {
         }
       }
       currPos++;
-      return (int) buff.get();
+      // ensure positive
+      return  ( ((int) buff.get()) & 0xff);
     }
 
     public void seek(long newPos) throws IOException {
       buff.clear();
       buff.limit(0);
-      if (newPos > chan.size()) throw new EOFException("Seek past EOF");
+      //if (newPos > fileSize) throw new EOFException("Seek past EOF");
       nextPos = newPos;
     }
 
@@ -99,7 +100,7 @@ public class SeekableInputStream extends DataInputStream implements DataInput {
 
     private int refill() throws IOException {
 
-      if (nextPos > chan.size()) throw new EOFException("Seek past EOF");
+      //if (nextPos > fileSize) throw new EOFException("Seek past EOF");
       buff.clear();
       int nRead = chan.read(buff, nextPos);
       // if none, return immediately

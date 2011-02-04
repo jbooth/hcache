@@ -11,7 +11,6 @@ import org.apache.hadoop.io.Text;
  */
 public class StringReader implements Closeable {
   private static ThreadLocal<Text> keyBuff = new ThreadLocal<Text>();
-  private static ThreadLocal<Text> valBuff = new ThreadLocal<Text>();
   private CdbReader<Text,Text> in;
   
   public StringReader(CdbReader<Text,Text> in) {
@@ -20,8 +19,8 @@ public class StringReader implements Closeable {
   
   public String get(String key) throws IOException {
     keyBuff.get().set(key);
-    in.find(keyBuff.get(), valBuff.get());
-    return valBuff.toString();
+    Text v = in.get(keyBuff.get());
+    return v.toString();
   }
   
   public void close() throws IOException {

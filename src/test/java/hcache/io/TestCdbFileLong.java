@@ -21,7 +21,7 @@ public class TestCdbFileLong {
     File file = new File("/tmp/cdb.test");
     OutputStream out = new BufferedOutputStream(new FileOutputStream("/tmp/cdb.test"));
     CdbWriter<LongWritable,LongWritable> writer = new CdbWriter<LongWritable,LongWritable>(out, LongWritable.class,LongWritable.class);
-    for (long j = 1 ; j < 20 ; j++) {
+    for (long j = 1 ; j < 100001 ; j++) {
       key.set(j);
       value.set(j * 1000);
       System.out.println("Adding " + key + " : " + value);

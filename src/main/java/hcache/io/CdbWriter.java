@@ -13,9 +13,12 @@ import org.apache.hadoop.io.Writable;
 public class CdbWriter<K extends Writable, V extends Writable> implements
     Closeable {
   // number of slots in the slot table
-  // should take the form of 2^x-1, so we can use & for quick modulo
-  public static final int SLOTSIZE = 4095;
-
+  // should take the form of 2^x
+  public static final int SLOTSIZE = 4096;
+  // all 1's, so (n & MAGIC == n % SLOTSIZE)
+  public static final int MAGIC = 4095;
+  // TODO make SLOTSIZE and MAGIC
+  
   private final Class<K> keyClass;
   private final Class<V> valueClass;
   private final FSDataOutputStream out;
@@ -37,13 +40,11 @@ public class CdbWriter<K extends Writable, V extends Writable> implements
   public CdbWriter(FSDataOutputStream out, Class<K> keyClass,
       Class<V> valueClass) throws IOException {
     this.out = out;
+    // todo need SLOTSIZE and MAGIC
     this.tableCount = new int[SLOTSIZE];
     this.keyClass = keyClass;
     this.valueClass = valueClass;
     this.hashPointers = new ArrayList<CdbHashPointer>();
-    /* Clear the table counts. */
-    for (int i = 0; i < 256; i++)
-      tableCount[i] = 0;
     /* Records can't be at position zero, so write one filler byte */
     out.write((byte) -1);
   }
@@ -57,8 +58,7 @@ public class CdbWriter<K extends Writable, V extends Writable> implements
     int hash = hash(key);
     /* Add this item to the count. */
     hashPointers.add(new CdbHashPointer(hash, recordPos));
-    System.err.println("Wrote " + key + ", pos : " + recordPos);
-    tableCount[hash & SLOTSIZE]++;
+    tableCount[ (hash & MAGIC) ]++;
   }
 
   public void close() throws IOException {
@@ -73,17 +73,20 @@ public class CdbWriter<K extends Writable, V extends Writable> implements
     CdbHashPointer last = null;
     for (int i = 0 ; i < hashPointers.size() ; i++) {
       CdbHashPointer hp = hashPointers.get(i);
-      if (last == null || hp.hash != last.hash) {
-        tableStart[hp.hash & SLOTSIZE] = i;
+      // if we crossed a boundary
+      if (last == null ||  (hp.hash&MAGIC) != (last.hash&MAGIC)) {
+        tableStart[hp.hash & MAGIC] = i;
       }
       last = hp;
     }
+    
     // now write the hash entries, build slot table as we go
     long[] slotPos = new long[SLOTSIZE];
     int[] slotLen = new int[SLOTSIZE];
     
     
     for (int i = 0; i < SLOTSIZE; i++) {
+
       int len = tableCount[i];
       // length 0 means we're a nonentity
       if (len == 0) {
@@ -94,9 +97,7 @@ public class CdbWriter<K extends Writable, V extends Writable> implements
       // record that we have a slot here
       slotPos[i] = out.getPos();
       slotLen[i] = len;
-
-      System.err.println("slot pos " + i + " : " + slotPos[i]);
-      System.err.println("slot len " + i + " : " + slotLen[i]);
+      
       /* Build the hash table for this slot. */
       int start = tableStart[i];
       CdbHashPointer[] hashTable = new CdbHashPointer[len];
@@ -109,7 +110,6 @@ public class CdbWriter<K extends Writable, V extends Writable> implements
         while (hashTable[where] != null)
           if (++where == len)
             where = 0;
-        System.err.println("Storing " + hp + " at " + where);
         /* Store the hash pointer. */
         hashTable[where] = hp;
       }
@@ -120,7 +120,6 @@ public class CdbWriter<K extends Writable, V extends Writable> implements
       for (int u = 0; u < len; u++) {
         CdbHashPointer hp = hashTable[u];
         if (hp != null) {
-          System.err.println(hashTable[u] + " at " + out.getPos());
           out.writeInt(hashTable[u].hash);
           out.writeLong(hashTable[u].pos);
         } else {
@@ -153,8 +152,8 @@ public class CdbWriter<K extends Writable, V extends Writable> implements
 
     // natural sort order by bucket
     public int compareTo(CdbHashPointer o) {
-      int thisVal = this.hash & SLOTSIZE;
-      int anotherVal = o.hash & SLOTSIZE;
+      int thisVal = this.hash & MAGIC;
+      int anotherVal = o.hash & MAGIC;
       return (thisVal<anotherVal ? -1 : (thisVal==anotherVal ? 0 : 1));
     };
 
