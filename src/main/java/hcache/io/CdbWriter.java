@@ -1,6 +1,8 @@
 package hcache.io;
 
 import java.io.Closeable;
+import java.io.DataInput;
+import java.io.DataOutput;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
@@ -15,10 +17,9 @@ public class CdbWriter<K extends Writable, V extends Writable> implements
   // number of slots in the slot table
   // should take the form of 2^x
   public static final int SLOTSIZE = 4096;
-  // all 1's, so (n & MAGIC == n % SLOTSIZE)
+  // all 1s, so (n & MAGIC == n % SLOTSIZE)
   public static final int MAGIC = 4095;
-  // TODO make SLOTSIZE and MAGIC
-  
+
   private final Class<K> keyClass;
   private final Class<V> valueClass;
   private final FSDataOutputStream out;
@@ -58,7 +59,7 @@ public class CdbWriter<K extends Writable, V extends Writable> implements
     int hash = hash(key);
     /* Add this item to the count. */
     hashPointers.add(new CdbHashPointer(hash, recordPos));
-    tableCount[ (hash & MAGIC) ]++;
+    tableCount[(hash & MAGIC)]++;
   }
 
   public void close() throws IOException {
@@ -71,20 +72,19 @@ public class CdbWriter<K extends Writable, V extends Writable> implements
     // store the index for the start of each slotsize in the list
     int[] tableStart = new int[SLOTSIZE];
     CdbHashPointer last = null;
-    for (int i = 0 ; i < hashPointers.size() ; i++) {
+    for (int i = 0; i < hashPointers.size(); i++) {
       CdbHashPointer hp = hashPointers.get(i);
       // if we crossed a boundary
-      if (last == null ||  (hp.hash&MAGIC) != (last.hash&MAGIC)) {
+      if (last == null || (hp.hash & MAGIC) != (last.hash & MAGIC)) {
         tableStart[hp.hash & MAGIC] = i;
       }
       last = hp;
     }
-    
+
     // now write the hash entries, build slot table as we go
     long[] slotPos = new long[SLOTSIZE];
     int[] slotLen = new int[SLOTSIZE];
-    
-    
+
     for (int i = 0; i < SLOTSIZE; i++) {
 
       int len = tableCount[i];
@@ -97,7 +97,7 @@ public class CdbWriter<K extends Writable, V extends Writable> implements
       // record that we have a slot here
       slotPos[i] = out.getPos();
       slotLen[i] = len;
-      
+
       /* Build the hash table for this slot. */
       int start = tableStart[i];
       CdbHashPointer[] hashTable = new CdbHashPointer[len];
@@ -113,9 +113,7 @@ public class CdbWriter<K extends Writable, V extends Writable> implements
         /* Store the hash pointer. */
         hashTable[where] = hp;
       }
-      
-      
-      
+
       /* Write out the hash table. */
       for (int u = 0; u < len; u++) {
         CdbHashPointer hp = hashTable[u];
@@ -143,18 +141,18 @@ public class CdbWriter<K extends Writable, V extends Writable> implements
     return h.hashCode() & Integer.MAX_VALUE;
   }
 
-  static class CdbHashPointer implements Comparable<CdbHashPointer> {
+  static class CdbHashPointer implements Comparable<CdbHashPointer>, Writable {
     /** The hash value of this entry. */
-    final int hash;
+    int hash;
 
     /** The position in the constant database of this entry. */
-    final long pos;
+    long pos;
 
     // natural sort order by bucket
     public int compareTo(CdbHashPointer o) {
       int thisVal = this.hash & MAGIC;
       int anotherVal = o.hash & MAGIC;
-      return (thisVal<anotherVal ? -1 : (thisVal==anotherVal ? 0 : 1));
+      return (thisVal < anotherVal ? -1 : (thisVal == anotherVal ? 0 : 1));
     };
 
     /**
@@ -176,5 +174,16 @@ public class CdbWriter<K extends Writable, V extends Writable> implements
       return "CdbHashPointer [hash=" + hash + ", pos=" + pos + "]";
     }
 
+    @Override
+    public void write(DataOutput out) throws IOException {
+      out.writeInt(hash);
+      out.writeLong(pos);
+    }
+
+    @Override
+    public void readFields(DataInput in) throws IOException {
+      hash = in.readInt();
+      pos = in.readLong();
+    }
   }
 }
